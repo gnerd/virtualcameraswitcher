@@ -1,11 +1,15 @@
 import logging
+import os
+import subprocess
+import sys
 import threading
 from functools import partial
+from pathlib import Path
 
 import pystray
 from PIL import Image, ImageDraw
 
-from .config import AppConfig
+from .config import AppConfig, CONFIG_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -14,9 +18,22 @@ def _create_icon_image(color: str = "green") -> Image.Image:
     """Create a simple colored circle icon."""
     img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    fill = {"green": (0, 200, 0), "red": (200, 0, 0), "yellow": (200, 200, 0)}.get(color, (0, 200, 0))
+    fill = {
+        "green": (0, 200, 0),
+        "red": (200, 0, 0),
+        "yellow": (220, 180, 0),
+        "gray": (130, 130, 130),
+    }.get(color, (0, 200, 0))
     draw.ellipse([8, 8, 56, 56], fill=fill)
     return img
+
+
+def _icon_for_state(starting: bool, running: bool) -> str:
+    if starting:
+        return "yellow"
+    if running:
+        return "green"
+    return "red"
 
 
 class TrayApp:
@@ -29,13 +46,33 @@ class TrayApp:
         self._icon: pystray.Icon | None = None
         self._active_camera: int | None = app.active_camera
 
-        # Register for camera change notifications
+        # Register for app notifications
         app._on_camera_change = self._on_camera_changed
+        app._on_state_change = self._on_state_changed
+
+    def _refresh(self):
+        if not self._icon:
+            return
+        self._icon.icon = _create_icon_image(
+            _icon_for_state(self._app.starting, self._app.running)
+        )
+        self._icon.title = self._status_text()
+        self._icon.update_menu()
 
     def _on_camera_changed(self, camera_index: int):
         self._active_camera = camera_index
-        if self._icon:
-            self._icon.update_menu()
+        self._refresh()
+
+    def _on_state_changed(self):
+        self._active_camera = self._app.active_camera
+        self._refresh()
+
+    def _status_text(self) -> str:
+        if self._app.starting:
+            return "Virtual Camera Switcher — Starting…"
+        if self._app.running:
+            return "Virtual Camera Switcher — Running"
+        return "Virtual Camera Switcher — Stopped"
 
     def _build_menu(self):
         camera_items = []
@@ -48,31 +85,75 @@ class TrayApp:
                 pystray.MenuItem(label, None, enabled=False)
             )
 
-        status = "Running" if self._app.running else "Stopped"
+        if self._app.starting:
+            toggle_label = "Starting…"
+            toggle_enabled = False
+        elif self._app.running:
+            toggle_label = "Pause"
+            toggle_enabled = True
+        else:
+            toggle_label = "Resume"
+            toggle_enabled = True
 
         return pystray.Menu(
-            pystray.MenuItem(f"Virtual Camera Switcher — {status}", None, enabled=False),
+            pystray.MenuItem(self._status_text(), None, enabled=False),
             pystray.Menu.SEPARATOR,
             *camera_items,
             pystray.Menu.SEPARATOR,
+            pystray.MenuItem(toggle_label, lambda: self._toggle(), enabled=toggle_enabled),
             pystray.MenuItem(
-                "Pause" if self._app.running else "Resume",
-                lambda: self._toggle(),
+                "Log to file",
+                lambda: self._toggle_logging(),
+                checked=lambda _item: self._is_logging_enabled(),
+            ),
+            pystray.MenuItem(
+                "Open logs folder",
+                lambda: self._open_logs_folder(),
             ),
             pystray.MenuItem("Quit", lambda: self._on_quit()),
         )
 
+    def _is_logging_enabled(self) -> bool:
+        # Imported lazily to avoid a circular import at module load time.
+        from .main import session_log_path
+        return session_log_path() is not None
+
+    def _toggle_logging(self):
+        from .main import enable_session_logging, disable_session_logging
+        if self._is_logging_enabled():
+            disable_session_logging()
+        else:
+            path = enable_session_logging()
+            if path is not None:
+                logger.info("Logging to %s", path)
+        self._refresh()
+
+    def _open_logs_folder(self):
+        logs_dir = CONFIG_DIR / "logs"
+        try:
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            if sys.platform.startswith("win"):
+                os.startfile(str(logs_dir))  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(logs_dir)])
+            else:
+                subprocess.Popen(["xdg-open", str(logs_dir)])
+        except Exception:
+            logger.exception("Failed to open logs folder %s", logs_dir)
+
     def _toggle(self):
+        if self._app.starting:
+            return
         self._app.toggle()
-        if self._icon:
-            self._icon.icon = _create_icon_image("green" if self._app.running else "red")
-            self._icon.update_menu()
+        self._refresh()
 
     def run(self):
         self._icon = pystray.Icon(
             "VirtualCameraSwitcher",
-            icon=_create_icon_image("green"),
-            title="Virtual Camera Switcher",
+            icon=_create_icon_image(
+                _icon_for_state(self._app.starting, self._app.running)
+            ),
+            title=self._status_text(),
             menu=self._build_menu(),
         )
         self._icon.run()

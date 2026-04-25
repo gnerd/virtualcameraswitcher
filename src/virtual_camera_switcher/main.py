@@ -1,20 +1,103 @@
 import argparse
 import logging
+import os
 import sys
 import threading
 import time
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 from .cameras import CameraManager, enumerate_cameras
-from .config import AppConfig
+from .config import AppConfig, CONFIG_DIR
 from .gaze import GazeDetector
-from .switcher import CameraSwitcher
+from .switcher import GazeSwitcher
 from .tray import TrayApp
 from .virtual_cam import VirtualCameraOutput
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+
+def _configure_logging(to_file: bool = False) -> None:
+    """Configure root logging. When running under pythonw.exe stderr is None,
+    so we must not attach a StreamHandler to it. When `to_file` is set we
+    also log to a rotating file in the config dir."""
+    handlers: list[logging.Handler] = []
+    if sys.stderr is not None:
+        handlers.append(logging.StreamHandler(sys.stderr))
+    if to_file or sys.stderr is None:
+        try:
+            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            handlers.append(
+                RotatingFileHandler(
+                    CONFIG_DIR / "vcs.log",
+                    maxBytes=512 * 1024,
+                    backupCount=2,
+                    encoding="utf-8",
+                )
+            )
+        except Exception:
+            pass
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        handlers=handlers,
+        force=True,
+    )
+
+
+# Module-level state for the on-demand timestamped log file (toggled from
+# the system tray). Off by default.
+_LOG_DIR = CONFIG_DIR / "logs"
+_session_log_handler: logging.Handler | None = None
+_session_log_path: Path | None = None
+
+
+def enable_session_logging() -> Path | None:
+    """Start writing INFO+ logs to a timestamped file in the logs dir.
+
+    Returns the file path, or None if logging is already enabled or setup
+    failed. Safe to call from any thread."""
+    global _session_log_handler, _session_log_path
+    if _session_log_handler is not None:
+        return _session_log_path
+    try:
+        _LOG_DIR.mkdir(parents=True, exist_ok=True)
+        ts = time.strftime("%Y-%m-%d_%H-%M-%S")
+        path = _LOG_DIR / f"vcs-{ts}.log"
+        handler = logging.FileHandler(path, encoding="utf-8")
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+        ))
+        handler.setLevel(logging.INFO)
+        logging.getLogger().addHandler(handler)
+        _session_log_handler = handler
+        _session_log_path = path
+        logging.getLogger(__name__).info("Session logging enabled: %s", path)
+        return path
+    except Exception:
+        logging.getLogger(__name__).exception("Failed to enable session logging")
+        return None
+
+
+def disable_session_logging() -> None:
+    """Stop the timestamped session log file (if any)."""
+    global _session_log_handler, _session_log_path
+    handler = _session_log_handler
+    if handler is None:
+        return
+    logging.getLogger(__name__).info("Session logging disabled: %s", _session_log_path)
+    logging.getLogger().removeHandler(handler)
+    try:
+        handler.close()
+    except Exception:
+        pass
+    _session_log_handler = None
+    _session_log_path = None
+
+
+def session_log_path() -> Path | None:
+    return _session_log_path
+
+
+_configure_logging()
 logger = logging.getLogger(__name__)
 
 
@@ -22,16 +105,54 @@ class App:
     def __init__(self, config: AppConfig):
         self.config = config
         self.running = False
-        self._pipeline_thread: threading.Thread | None = None
+        self.starting = False
+        self._output_thread: threading.Thread | None = None
+        self._coordinator_thread: threading.Thread | None = None
+        self._start_thread: threading.Thread | None = None
         self._camera_manager: CameraManager | None = None
         self._virtual_cam: VirtualCameraOutput | None = None
-        self._gaze_detector: GazeDetector | None = None
-        self._switcher: CameraSwitcher | None = None
+        self._detector: GazeDetector | None = None
+        self._switcher: GazeSwitcher | None = None
         self._active_camera: int | None = None
         self._on_camera_change: callable | None = None
+        self._on_state_change: callable | None = None
+        # Stats (only touched by coordinator thread + read for logging).
+        self._frames_processed: dict[int, int] = {}
+        self._faces_seen: dict[int, int] = {}
+        self._last_yaw: dict[int, float | None] = {}
+
+    def _notify_state(self):
+        cb = self._on_state_change
+        if cb:
+            try:
+                cb()
+            except Exception:
+                logger.exception("on_state_change callback failed")
+
+    def start_pipeline_async(self):
+        """Kick off pipeline startup in a background thread so the tray UI can
+        appear immediately. The tray will show a yellow 'Starting...' icon
+        until startup completes."""
+        if self.starting or self.running:
+            return
+        self.starting = True
+        self._notify_state()
+        self._start_thread = threading.Thread(
+            target=self._start_pipeline_worker, daemon=True
+        )
+        self._start_thread.start()
+
+    def _start_pipeline_worker(self):
+        try:
+            self.start_pipeline()
+        except Exception:
+            logger.exception("Pipeline startup failed")
+        finally:
+            self.starting = False
+            self._notify_state()
 
     def start_pipeline(self):
-        """Start the camera switching pipeline in a background thread."""
+        """Start the camera switching pipeline in background threads."""
         if not self.config.cameras:
             logger.error("No cameras configured. Run with --setup first.")
             return
@@ -39,75 +160,157 @@ class App:
         self._camera_manager = CameraManager(
             self.config.cameras,
             (self.config.output_width, self.config.output_height),
+            capture_width=self.config.capture_width,
+            capture_height=self.config.capture_height,
+            capture_fps=self.config.capture_fps,
+            capture_fourcc=self.config.capture_fourcc,
+            overrides=self.config.camera_overrides,
         )
+        available = self._camera_manager.available_indices
+        if not available:
+            logger.error("No cameras could be opened; aborting pipeline start.")
+            return
+        if len(available) < len(self.config.cameras):
+            logger.warning(
+                "Only %d/%d configured cameras opened; switching limited to %s",
+                len(available), len(self.config.cameras), available,
+            )
+
         self._virtual_cam = VirtualCameraOutput(
             self.config.output_width,
             self.config.output_height,
             self.config.output_fps,
-            device=self.config.virtual_camera_name,
+            device=self.config.virtual_camera_name or None,
+            backend=self.config.virtual_camera_backend or None,
         )
-        self._gaze_detector = GazeDetector()
-        self._switcher = CameraSwitcher(
-            self.config.cameras, self.config.hysteresis_frames,
-        )
-        self._active_camera = self._switcher.current_camera_index
 
+        # One detector for the whole app. MediaPipe is not thread-safe, so the
+        # coordinator thread is the only thing that ever calls it.
+        self._detector = GazeDetector(max_width=self.config.detect_max_width)
+
+        self._switcher = GazeSwitcher(
+            available,
+            active_index=available[0],
+            locked_fps=self.config.detect_fps_locked,
+            searching_fps=self.config.detect_fps_searching,
+            look_away_yaw_deg=self.config.look_away_yaw_deg,
+            look_away_grace_s=self.config.look_away_grace_s,
+            search_timeout_s=self.config.search_timeout_s,
+        )
+        self._active_camera = self._switcher.active
+        self._camera_manager.active_index = self._active_camera
+
+        self._frames_processed = {idx: 0 for idx in available}
+        self._faces_seen = {idx: 0 for idx in available}
+        self._last_yaw = {idx: None for idx in available}
+
+        self._camera_manager.start_readers()
         self._virtual_cam.start()
         self.running = True
-        self._pipeline_thread = threading.Thread(target=self._run_pipeline, daemon=True)
-        self._pipeline_thread.start()
-        logger.info("Pipeline started")
 
-    def _run_pipeline(self):
+        self._coordinator_thread = threading.Thread(
+            target=self._coordinator_loop, daemon=True,
+        )
+        self._coordinator_thread.start()
+
+        self._output_thread = threading.Thread(target=self._output_loop, daemon=True)
+        self._output_thread.start()
+        logger.info(
+            "Pipeline started (1 coordinator + 1 output thread; locked@%.1fHz searching@%.1fHz)",
+            self.config.detect_fps_locked, self.config.detect_fps_searching,
+        )
+
+    def _coordinator_loop(self):
+        """Single-threaded gaze detection driven by the switcher state machine."""
+        last_stats = time.monotonic()
         try:
             while self.running:
-                # Read all cameras and detect yaw on each
-                yaw_by_camera: dict[int, float | None] = {}
-                for idx in self._camera_manager.available_indices:
-                    frame = self._camera_manager.read_camera(idx)
-                    if frame is not None:
-                        yaw_by_camera[idx] = self._gaze_detector.detect_yaw(frame)
-                    else:
-                        yaw_by_camera[idx] = None
+                targets, sleep_after = self._switcher.next_targets()
 
-                # Determine which camera to use
-                best = self._switcher.update(yaw_by_camera)
-                if best is not None and best != self._active_camera:
-                    self._active_camera = best
-                    self._camera_manager.active_index = best
+                results: dict[int, float | None] = {}
+                for idx in targets:
+                    frame, _ = self._camera_manager.read_camera(idx)
+                    if frame is None:
+                        results[idx] = None
+                        continue
+                    yaw = self._detector.detect_yaw(frame)
+                    results[idx] = yaw
+                    self._frames_processed[idx] += 1
+                    if yaw is not None:
+                        self._faces_seen[idx] += 1
+                    self._last_yaw[idx] = yaw
+
+                new_active = self._switcher.submit(results)
+                if new_active is not None and new_active != self._active_camera:
+                    self._active_camera = new_active
+                    self._camera_manager.active_index = new_active
                     if self._on_camera_change:
-                        self._on_camera_change(best)
+                        self._on_camera_change(new_active)
 
-                # Send active camera frame to virtual camera
+                # Periodic stats so we can see the state machine working.
+                now = time.monotonic()
+                if now - last_stats >= 5.0:
+                    last_stats = now
+                    reader_stats = self._camera_manager.reader_stats()
+                    parts = []
+                    for idx in sorted(reader_stats):
+                        frames, failures = reader_stats[idx]
+                        y = self._last_yaw.get(idx)
+                        y_str = f"{y:+.1f}" if y is not None else "no-face"
+                        parts.append(
+                            f"cam{idx}: read={frames} fail={failures} "
+                            f"detect={self._frames_processed.get(idx, 0)} "
+                            f"faces={self._faces_seen.get(idx, 0)} yaw={y_str}"
+                        )
+                    logger.info(
+                        "state=%s active=%s | %s",
+                        self._switcher.state.value, self._active_camera, " | ".join(parts),
+                    )
+
+                if sleep_after > 0:
+                    time.sleep(sleep_after)
+        except Exception:
+            logger.exception("Coordinator loop error")
+
+    def _output_loop(self):
+        """Send frames to the virtual camera at the configured fps."""
+        try:
+            while self.running:
                 frame = self._camera_manager.read_active()
                 if frame is not None:
                     self._virtual_cam.send_frame(frame)
+                else:
+                    time.sleep(1.0 / self.config.output_fps)
         except Exception:
-            logger.exception("Pipeline error")
-        finally:
-            pass
+            logger.exception("Output loop error")
 
     def stop_pipeline(self):
         self.running = False
-        if self._pipeline_thread:
-            self._pipeline_thread.join(timeout=5)
+        if self._output_thread:
+            self._output_thread.join(timeout=5)
+        if self._coordinator_thread:
+            self._coordinator_thread.join(timeout=5)
         if self._virtual_cam:
             self._virtual_cam.close()
         if self._camera_manager:
             self._camera_manager.close()
-        if self._gaze_detector:
-            self._gaze_detector.close()
+        if self._detector:
+            self._detector.close()
+            self._detector = None
         logger.info("Pipeline stopped")
+        self._notify_state()
 
     @property
     def active_camera(self) -> int | None:
         return self._active_camera
 
     def toggle(self):
+        if self.starting:
+            return
         if self.running:
             self.stop_pipeline()
         else:
-            self.start_pipeline()
+            self.start_pipeline_async()
 
 
 def interactive_setup() -> AppConfig:
@@ -171,13 +374,35 @@ def main():
         finally:
             app.stop_pipeline()
     else:
-        app.start_pipeline()
+        # Show tray immediately; start the (slow) pipeline in the background.
         tray = TrayApp(
             config,
             app,
             on_quit=lambda: (app.stop_pipeline(), tray.stop()),
         )
+        app.start_pipeline_async()
         tray.run()
+
+
+def main_gui():
+    """Windowless entry point for `vcsw` (no console).
+
+    File logging is OFF by default — enable it from the tray menu when you
+    want a session log written to disk."""
+    config = AppConfig.load()
+    if not config.cameras:
+        logger.error(
+            "No cameras configured. Run `vcs --setup` from a terminal first."
+        )
+        return
+    app = App(config)
+    tray = TrayApp(
+        config,
+        app,
+        on_quit=lambda: (app.stop_pipeline(), tray.stop()),
+    )
+    app.start_pipeline_async()
+    tray.run()
 
 
 if __name__ == "__main__":

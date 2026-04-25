@@ -19,5 +19,9 @@ dependencies = [
 [project.scripts]
 vcs = "virtual_camera_switcher.main:main"
 
+[project.gui-scripts]
+# Windowless launcher: no cmd window, runs the tray app directly.
+vcsw = "virtual_camera_switcher.main:main_gui"
+
 [tool.setuptools.packages.find]
 where = ["src"]

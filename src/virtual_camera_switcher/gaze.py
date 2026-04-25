@@ -24,7 +24,11 @@ _MODEL_PATH = Path(__file__).parent / "face_landmarker.task"
 
 
 class GazeDetector:
-    def __init__(self):
+    def __init__(self, max_width: int | None = 480):
+        """`max_width`: if set, frames wider than this are downscaled before
+        running MediaPipe. Yaw is geometric and is unaffected by downscaling,
+        but detection becomes ~10x faster at 480px wide."""
+        self._max_width = max_width
         base_options = mp.tasks.BaseOptions(model_asset_path=str(_MODEL_PATH))
         options = mp.tasks.vision.FaceLandmarkerOptions(
             base_options=base_options,
@@ -37,6 +41,10 @@ class GazeDetector:
     def detect_yaw(self, frame_bgr: np.ndarray) -> float | None:
         """Return the head yaw angle in degrees, or None if no face found.
         Closer to 0 means the person is facing the camera straight-on."""
+        if self._max_width and frame_bgr.shape[1] > self._max_width:
+            scale = self._max_width / frame_bgr.shape[1]
+            new_size = (self._max_width, int(round(frame_bgr.shape[0] * scale)))
+            frame_bgr = cv2.resize(frame_bgr, new_size, interpolation=cv2.INTER_AREA)
         h, w = frame_bgr.shape[:2]
         frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
@@ -69,7 +77,18 @@ class GazeDetector:
             return None
 
         rotation_mat, _ = cv2.Rodrigues(rotation_vec)
-        yaw = float(np.degrees(np.arctan2(rotation_mat[1, 0], rotation_mat[0, 0])))
+        # Decompose to Tait-Bryan (yaw-pitch-roll). Using cv2.RQDecomp3x3
+        # gives the three Euler angles in degrees directly. The order of the
+        # returned tuple is (pitch_x, yaw_y, roll_z).
+        euler, *_ = cv2.RQDecomp3x3(rotation_mat)
+        yaw = float(euler[1])
+        # OpenCV/PnP returns yaw with a 180-degree ambiguity: looking at the
+        # camera often comes back as ~±180 instead of 0. Wrap into [-90, 90]
+        # so "front-facing" is always near zero.
+        if yaw > 90.0:
+            yaw -= 180.0
+        elif yaw < -90.0:
+            yaw += 180.0
         return yaw
 
     def close(self):
