@@ -34,15 +34,18 @@ virtual camera that seamlessly changes its source as you turn your head.
 
 ## Installation
 
-```bash
-pip install -e .
-```
-
-To register the Unity Capture virtual camera filter (requires admin):
-
 ```cmd
-install.bat
+git clone https://github.com/gnerd/virtualcameraswitcher.git
+cd virtualcameraswitcher
 ```
+
+Then **right-click `install.bat` → Run as administrator**. The installer will:
+
+1. Register the bundled Unity Capture DirectShow filter (`filters\UnityCaptureFilter64.dll`).
+2. Install the Python package and dependencies (`pip install -e .`).
+3. Download the MediaPipe face-landmarker model on first run.
+
+Nothing else has to be downloaded or registered manually.
 
 ## Usage
 
@@ -59,10 +62,11 @@ vcs --setup
 Start the virtual camera switcher as a system-tray application:
 
 ```bash
-vcs
+vcs       # console version (shows logs in a terminal window)
+vcsw      # windowless version (recommended; no terminal window)
 ```
 
-Use `--no-tray` to run in console mode instead.
+Use `vcs --no-tray` to run in console-only mode without a tray icon.
 
 ## Configuration
 

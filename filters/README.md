@@ -1,16 +1,16 @@
 ---
 title: Virtual Camera Filters
 description: >-
-  Place the Unity Capture DirectShow filter DLLs in this directory.
+  DirectShow virtual-camera filter DLLs bundled with this project.
 ---
 
-## Setup
+## Bundled
 
-Download the pre-built DLLs from the
-[Unity Capture repository](https://github.com/schellingb/UnityCapture)
-and place them here:
+- `UnityCaptureFilter64.dll` — Unity Capture DirectShow filter, MIT-licensed,
+  copied unchanged from the upstream
+  [Unity Capture repository](https://github.com/schellingb/UnityCapture).
 
-- `UnityCaptureFilter64.dll` (required)
-- `UnityCaptureFilter32.dll` (optional, for 32-bit apps)
-
-Then run `install.bat` as Administrator to register the filters.
+`install.bat` (run as Administrator) registers this DLL with `regsvr32`
+so video-calling apps see the virtual camera. Re-run the installer if you
+move the repository to a different path — the DLL must stay where it was
+registered.
