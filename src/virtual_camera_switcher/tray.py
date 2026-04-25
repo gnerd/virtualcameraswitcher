@@ -201,15 +201,22 @@ class TrayApp:
         threading.Thread(target=self._save_snapshots_worker, daemon=True).start()
 
     def _save_snapshots_worker(self):
+        # Audible "shutter" cue so the user knows the moment the frame is grabbed.
+        self._calibration_beep(0)
         try:
             paths = self._app.save_snapshots()
-            if paths and sys.platform.startswith("win"):
+            if not paths:
+                self._calibration_beep(-1)
+                return
+            self._calibration_beep(-2)
+            if sys.platform.startswith("win"):
                 try:
                     os.startfile(str(paths[0].parent))  # type: ignore[attr-defined]
                 except Exception:
                     pass
         except Exception:
             logger.exception("Snapshot error")
+            self._calibration_beep(-1)
 
     def _is_logging_enabled(self) -> bool:
         # Imported lazily to avoid a circular import at module load time.
