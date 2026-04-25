@@ -374,16 +374,31 @@ class App:
         samples: list[float] = []
         deadline = time.monotonic() + duration_s
         last_seen_id = -1
+        last_frame = None
         while time.monotonic() < deadline:
             frame, frame_id = self._camera_manager.read_camera(camera_index)
             if frame is None or frame_id == last_seen_id:
                 time.sleep(0.05)
                 continue
             last_seen_id = frame_id
+            last_frame = frame
             yaw = self._detector.detect_yaw(frame)
             if yaw is not None:
                 samples.append(yaw)
             time.sleep(0.05)
+        # Save what we actually saw so the user can verify the calibration
+        # frame matched what they intended (e.g. they were looking head-on).
+        if last_frame is not None:
+            try:
+                import cv2
+                snap_dir = CONFIG_DIR / "snapshots"
+                snap_dir.mkdir(parents=True, exist_ok=True)
+                ts = time.strftime("%Y-%m-%d_%H-%M-%S")
+                path = snap_dir / f"calibrate-cam{camera_index}-{ts}.png"
+                cv2.imwrite(str(path), last_frame)
+                logger.info("Saved calibration snapshot %s", path)
+            except Exception:
+                logger.exception("Failed to save calibration snapshot")
         if len(samples) < 3:
             logger.warning(
                 "calibrate_camera: cam%d only produced %d face samples; aborting",
