@@ -142,11 +142,11 @@ class TrayApp:
     def _calibration_items(self):
         items = []
         for idx in self._config.cameras:
-            # Capture idx via default-arg trick. Pystray invokes menu item
-            # callables with a single (item) argument.
+            # Use *_args so pystray can pass either (item) or (icon, item)
+            # without clobbering our default-arg idx capture.
             items.append(pystray.MenuItem(
                 f"cam{idx}: {self._device_name(idx)}",
-                lambda _item, i=idx: self._calibrate_menu_action(i),
+                lambda *_args, i=idx: self._calibrate_menu_action(i),
             ))
         if not items:
             items.append(pystray.MenuItem("(no cameras)", None, enabled=False))
