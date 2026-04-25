@@ -349,6 +349,11 @@ class App:
         remaining (use it to beep / log)."""
         if not self.running or not self._detector or not self._camera_manager:
             logger.warning("calibrate_camera: pipeline not running")
+            if on_countdown_tick:
+                try:
+                    on_countdown_tick(-1)  # error tone — user gets feedback
+                except Exception:
+                    pass
             return None
         if countdown_s > 0:
             logger.info("Calibrating cam%d in %.1fs — look at it", camera_index, countdown_s)
