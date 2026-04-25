@@ -10,6 +10,7 @@ import pystray
 from PIL import Image, ImageDraw
 
 from .config import AppConfig, CONFIG_DIR
+from .cameras import get_device_names
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,9 @@ class TrayApp:
         self._on_quit = on_quit
         self._icon: pystray.Icon | None = None
         self._active_camera: int | None = app.active_camera
+        # Map index -> friendly Windows device name (DSHOW order). Empty if
+        # pygrabber isn't installed; we fall back to "Camera N" in that case.
+        self._device_names: list[str] = get_device_names()
 
         # Register for app notifications
         app._on_camera_change = self._on_camera_changed
@@ -124,8 +128,12 @@ class TrayApp:
         active = idx == self._active_camera
         prefix = "● " if active else "  "
         suffix = " (active)" if active else ""
-        return f"{prefix}Camera {idx}{suffix}"
+        return f"{prefix}cam{idx}: {self._device_name(idx)}{suffix}"
 
+    def _device_name(self, idx: int) -> str:
+        if 0 <= idx < len(self._device_names):
+            return self._device_names[idx]
+        return f"Camera {idx}"
     def _toggle_label(self) -> str:
         if self._app.starting:
             return "Starting…"
@@ -135,7 +143,7 @@ class TrayApp:
         items = []
         for idx in self._config.cameras:
             items.append(pystray.MenuItem(
-                f"Camera {idx}: look at it then click",
+                f"cam{idx}: {self._device_name(idx)}",
                 partial(self._calibrate_menu_action, idx),
             ))
         if not items:

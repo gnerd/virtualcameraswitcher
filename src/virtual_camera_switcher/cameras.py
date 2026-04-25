@@ -24,8 +24,20 @@ class CameraInfo:
     height: int
 
 
+def get_device_names() -> list[str]:
+    """Return Windows DirectShow device names in OpenCV index order.
+    Returns an empty list if pygrabber isn't available or enumeration fails."""
+    try:
+        from pygrabber.dshow_graph import FilterGraph  # type: ignore
+        return list(FilterGraph().get_input_devices())
+    except Exception as e:
+        logger.debug("Could not enumerate DirectShow device names: %s", e)
+        return []
+
+
 def enumerate_cameras(max_index: int = 10) -> list[CameraInfo]:
     """Probe camera indices and return available cameras."""
+    names = get_device_names()
     cameras = []
     for i in range(max_index):
         cap = None
@@ -38,7 +50,8 @@ def enumerate_cameras(max_index: int = 10) -> list[CameraInfo]:
         if cap is not None and cap.isOpened():
             w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            cameras.append(CameraInfo(index=i, name=f"Camera {i}", width=w, height=h))
+            friendly = names[i] if i < len(names) else f"Camera {i}"
+            cameras.append(CameraInfo(index=i, name=friendly, width=w, height=h))
             cap.release()
     return cameras
 
