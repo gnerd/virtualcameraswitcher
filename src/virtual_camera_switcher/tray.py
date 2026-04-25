@@ -75,65 +75,75 @@ class TrayApp:
         return "Virtual Camera Switcher — Stopped"
 
     def _build_menu(self):
-        camera_items = []
-        for idx in self._config.cameras:
-            is_active = idx == self._active_camera
-            label = f"Camera {idx}"
-            if is_active:
-                label = f"● Camera {idx} (active)"
-            camera_items.append(
-                pystray.MenuItem(label, None, enabled=False)
+        # All `text` and `enabled` values are callables so pystray re-evaluates
+        # them every time the menu is opened. Without this, the menu would
+        # freeze in whatever state existed when the icon was first created.
+        camera_items = [
+            pystray.MenuItem(
+                partial(self._camera_label, idx),
+                None,
+                enabled=False,
             )
-
-        if self._app.starting:
-            toggle_label = "Starting…"
-            toggle_enabled = False
-        elif self._app.running:
-            toggle_label = "Pause"
-            toggle_enabled = True
-        else:
-            toggle_label = "Resume"
-            toggle_enabled = True
+            for idx in self._config.cameras
+        ]
 
         return pystray.Menu(
-            pystray.MenuItem(self._status_text(), None, enabled=False),
+            pystray.MenuItem(lambda _i: self._status_text(), None, enabled=False),
             pystray.Menu.SEPARATOR,
             *camera_items,
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem(toggle_label, lambda: self._toggle(), enabled=toggle_enabled),
+            pystray.MenuItem(
+                lambda _i: self._toggle_label(),
+                lambda _i: self._toggle(),
+                enabled=lambda _i: not self._app.starting,
+            ),
             pystray.MenuItem(
                 "Calibrate camera",
                 pystray.Menu(*self._calibration_items()),
-                enabled=self._app.running,
+                enabled=lambda _i: self._app.running,
             ),
             pystray.MenuItem(
                 "Save snapshots",
-                lambda: self._save_snapshots(),
-                enabled=self._app.running,
+                lambda _i: self._save_snapshots(),
+                enabled=lambda _i: self._app.running,
             ),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(
                 "Log to file",
-                lambda: self._toggle_logging(),
-                checked=lambda _item: self._is_logging_enabled(),
+                lambda _i: self._toggle_logging(),
+                checked=lambda _i: self._is_logging_enabled(),
             ),
             pystray.MenuItem(
                 "Open logs folder",
-                lambda: self._open_logs_folder(),
+                lambda _i: self._open_logs_folder(),
             ),
-            pystray.MenuItem("Quit", lambda: self._on_quit()),
+            pystray.MenuItem("Quit", lambda _i: self._on_quit()),
         )
+
+    def _camera_label(self, idx: int, _item=None) -> str:
+        active = idx == self._active_camera
+        prefix = "● " if active else "  "
+        suffix = " (active)" if active else ""
+        return f"{prefix}Camera {idx}{suffix}"
+
+    def _toggle_label(self) -> str:
+        if self._app.starting:
+            return "Starting…"
+        return "Pause" if self._app.running else "Resume"
 
     def _calibration_items(self):
         items = []
         for idx in self._config.cameras:
             items.append(pystray.MenuItem(
                 f"Camera {idx}: look at it then click",
-                partial(self._calibrate, idx),
+                partial(self._calibrate_menu_action, idx),
             ))
         if not items:
             items.append(pystray.MenuItem("(no cameras)", None, enabled=False))
         return items
+
+    def _calibrate_menu_action(self, camera_index: int, _item=None):
+        self._calibrate(camera_index)
 
     def _calibrate(self, camera_index: int):
         # Calibration takes ~2s and should not block the pystray UI thread.
