@@ -102,6 +102,17 @@ class TrayApp:
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(toggle_label, lambda: self._toggle(), enabled=toggle_enabled),
             pystray.MenuItem(
+                "Calibrate camera",
+                pystray.Menu(*self._calibration_items()),
+                enabled=self._app.running,
+            ),
+            pystray.MenuItem(
+                "Save snapshots",
+                lambda: self._save_snapshots(),
+                enabled=self._app.running,
+            ),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem(
                 "Log to file",
                 lambda: self._toggle_logging(),
                 checked=lambda _item: self._is_logging_enabled(),
@@ -112,6 +123,47 @@ class TrayApp:
             ),
             pystray.MenuItem("Quit", lambda: self._on_quit()),
         )
+
+    def _calibration_items(self):
+        items = []
+        for idx in self._config.cameras:
+            items.append(pystray.MenuItem(
+                f"Camera {idx}: look at it then click",
+                partial(self._calibrate, idx),
+            ))
+        if not items:
+            items.append(pystray.MenuItem("(no cameras)", None, enabled=False))
+        return items
+
+    def _calibrate(self, camera_index: int):
+        # Calibration takes ~2s and should not block the pystray UI thread.
+        threading.Thread(
+            target=self._calibrate_worker, args=(camera_index,), daemon=True,
+        ).start()
+
+    def _calibrate_worker(self, camera_index: int):
+        try:
+            offset = self._app.calibrate_camera(camera_index)
+            if offset is None:
+                logger.warning("Calibration of cam%d failed (no face detected)", camera_index)
+            else:
+                logger.info("Calibration of cam%d done: yaw_offset=%+.2f", camera_index, offset)
+        except Exception:
+            logger.exception("Calibration error")
+
+    def _save_snapshots(self):
+        threading.Thread(target=self._save_snapshots_worker, daemon=True).start()
+
+    def _save_snapshots_worker(self):
+        try:
+            paths = self._app.save_snapshots()
+            if paths and sys.platform.startswith("win"):
+                try:
+                    os.startfile(str(paths[0].parent))  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+        except Exception:
+            logger.exception("Snapshot error")
 
     def _is_logging_enabled(self) -> bool:
         # Imported lazily to avoid a circular import at module load time.

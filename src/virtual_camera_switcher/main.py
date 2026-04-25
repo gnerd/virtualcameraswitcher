@@ -223,6 +223,8 @@ class App:
     def _coordinator_loop(self):
         """Single-threaded gaze detection driven by the switcher state machine."""
         last_stats = time.monotonic()
+        # Snapshot per-camera yaw offsets up front; calibration updates these
+        # via reload_yaw_offsets() so we always see the latest.
         try:
             while self.running:
                 targets, sleep_after = self._switcher.next_targets()
@@ -233,12 +235,17 @@ class App:
                     if frame is None:
                         results[idx] = None
                         continue
-                    yaw = self._detector.detect_yaw(frame)
-                    results[idx] = yaw
+                    raw_yaw = self._detector.detect_yaw(frame)
                     self._frames_processed[idx] += 1
-                    if yaw is not None:
-                        self._faces_seen[idx] += 1
-                    self._last_yaw[idx] = yaw
+                    if raw_yaw is None:
+                        results[idx] = None
+                        self._last_yaw[idx] = None
+                        continue
+                    self._faces_seen[idx] += 1
+                    offset = self.config.override_for(idx).yaw_offset
+                    adjusted = raw_yaw - offset
+                    results[idx] = adjusted
+                    self._last_yaw[idx] = adjusted
 
                 new_active = self._switcher.submit(results)
                 if new_active is not None and new_active != self._active_camera:
@@ -299,6 +306,74 @@ class App:
             self._detector = None
         logger.info("Pipeline stopped")
         self._notify_state()
+
+    def save_snapshots(self, out_dir: Path | None = None) -> list[Path]:
+        """Write the latest frame from each opened camera to disk for
+        debugging. Files are named `snapshot-cam{idx}-{timestamp}.png`."""
+        if not self._camera_manager:
+            logger.warning("save_snapshots: pipeline not running")
+            return []
+        # Lazy import so this module's top-level remains light.
+        import cv2
+        if out_dir is None:
+            out_dir = CONFIG_DIR / "snapshots"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        ts = time.strftime("%Y-%m-%d_%H-%M-%S")
+        written: list[Path] = []
+        for idx in self._camera_manager.available_indices:
+            frame, _ = self._camera_manager.read_camera(idx)
+            if frame is None:
+                logger.warning("save_snapshots: cam%d has no frame yet", idx)
+                continue
+            path = out_dir / f"snapshot-cam{idx}-{ts}.png"
+            try:
+                cv2.imwrite(str(path), frame)
+                written.append(path)
+                logger.info("Saved snapshot %s (%dx%d)", path, frame.shape[1], frame.shape[0])
+            except Exception:
+                logger.exception("Failed to write snapshot %s", path)
+        return written
+
+    def calibrate_camera(self, camera_index: int, duration_s: float = 2.0) -> float | None:
+        """Sample yaw on `camera_index` for `duration_s` seconds (user should
+        be looking straight at it) and store the median raw yaw as that
+        camera's `yaw_offset`. Returns the offset, or None on failure."""
+        if not self.running or not self._detector or not self._camera_manager:
+            logger.warning("calibrate_camera: pipeline not running")
+            return None
+        logger.info("Calibrating cam%d over %.1fs — look straight at it now",
+                    camera_index, duration_s)
+        samples: list[float] = []
+        deadline = time.monotonic() + duration_s
+        last_seen_id = -1
+        while time.monotonic() < deadline:
+            frame, frame_id = self._camera_manager.read_camera(camera_index)
+            if frame is None or frame_id == last_seen_id:
+                time.sleep(0.05)
+                continue
+            last_seen_id = frame_id
+            yaw = self._detector.detect_yaw(frame)
+            if yaw is not None:
+                samples.append(yaw)
+            time.sleep(0.05)
+        if len(samples) < 3:
+            logger.warning(
+                "calibrate_camera: cam%d only produced %d face samples; aborting",
+                camera_index, len(samples),
+            )
+            return None
+        samples.sort()
+        median = samples[len(samples) // 2]
+        self.config.set_yaw_offset(camera_index, median)
+        try:
+            self.config.save()
+        except Exception:
+            logger.exception("calibrate_camera: failed to persist config")
+        logger.info(
+            "Calibrated cam%d: yaw_offset=%+.2f (median of %d samples)",
+            camera_index, median, len(samples),
+        )
+        return median
 
     @property
     def active_camera(self) -> int | None:

@@ -29,6 +29,10 @@ class CameraOverride:
     capture_fps: int | None = None
     capture_fourcc: str | None = None
     capture_backend: str | None = None
+    # Calibrated yaw offset (degrees) subtracted from raw yaw before the
+    # switcher's look-away check. Use this when a camera is mounted at an
+    # angle: facing the lens shouldn't read as "looking away."
+    yaw_offset: float = 0.0
     controls: dict[str, float] = field(default_factory=dict)
 
 
@@ -64,6 +68,13 @@ class AppConfig:
 
     def override_for(self, camera_index: int) -> CameraOverride:
         return self.camera_overrides.get(camera_index, CameraOverride())
+
+    def set_yaw_offset(self, camera_index: int, offset: float) -> None:
+        ov = self.camera_overrides.get(camera_index)
+        if ov is None:
+            ov = CameraOverride()
+            self.camera_overrides[camera_index] = ov
+        ov.yaw_offset = float(offset)
 
     def save(self):
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
