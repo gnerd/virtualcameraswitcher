@@ -153,13 +153,41 @@ class TrayApp:
 
     def _calibrate_worker(self, camera_index: int):
         try:
-            offset = self._app.calibrate_camera(camera_index)
+            offset = self._app.calibrate_camera(
+                camera_index,
+                on_countdown_tick=self._calibration_beep,
+            )
             if offset is None:
                 logger.warning("Calibration of cam%d failed (no face detected)", camera_index)
+                self._calibration_beep(-1)  # error tone
             else:
                 logger.info("Calibration of cam%d done: yaw_offset=%+.2f", camera_index, offset)
+                self._calibration_beep(-2)  # success tone
         except Exception:
             logger.exception("Calibration error")
+
+    @staticmethod
+    def _calibration_beep(remaining: int) -> None:
+        """Audible cue during calibration. Negative codes are special:
+        -1 = error (low tone), -2 = success (rising chime)."""
+        try:
+            if sys.platform.startswith("win"):
+                import winsound
+                if remaining > 0:
+                    winsound.Beep(700, 120)         # tick
+                elif remaining == 0:
+                    winsound.Beep(1200, 250)        # "GO — hold still"
+                elif remaining == -1:
+                    winsound.Beep(300, 400)         # error
+                else:  # -2 success
+                    winsound.Beep(1000, 100)
+                    winsound.Beep(1400, 180)
+            else:
+                # Cross-platform fallback: terminal bell.
+                sys.stdout.write("\a")
+                sys.stdout.flush()
+        except Exception:
+            pass
 
     def _save_snapshots(self):
         threading.Thread(target=self._save_snapshots_worker, daemon=True).start()

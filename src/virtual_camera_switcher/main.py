@@ -334,15 +334,38 @@ class App:
                 logger.exception("Failed to write snapshot %s", path)
         return written
 
-    def calibrate_camera(self, camera_index: int, duration_s: float = 2.0) -> float | None:
+    def calibrate_camera(
+        self,
+        camera_index: int,
+        duration_s: float = 2.0,
+        countdown_s: float = 2.5,
+        on_countdown_tick: callable = None,
+    ) -> float | None:
         """Sample yaw on `camera_index` for `duration_s` seconds (user should
         be looking straight at it) and store the median raw yaw as that
-        camera's `yaw_offset`. Returns the offset, or None on failure."""
+        camera's `yaw_offset`. A `countdown_s` delay runs first so the user
+        can look back at the camera after clicking the menu; `on_countdown_tick`
+        is called once per second of countdown with the integer seconds
+        remaining (use it to beep / log)."""
         if not self.running or not self._detector or not self._camera_manager:
             logger.warning("calibrate_camera: pipeline not running")
             return None
-        logger.info("Calibrating cam%d over %.1fs — look straight at it now",
-                    camera_index, duration_s)
+        if countdown_s > 0:
+            logger.info("Calibrating cam%d in %.1fs — look at it", camera_index, countdown_s)
+            ticks = max(1, int(round(countdown_s)))
+            for remaining in range(ticks, 0, -1):
+                if on_countdown_tick:
+                    try:
+                        on_countdown_tick(remaining)
+                    except Exception:
+                        logger.exception("countdown tick callback failed")
+                time.sleep(countdown_s / ticks)
+            if on_countdown_tick:
+                try:
+                    on_countdown_tick(0)
+                except Exception:
+                    pass
+        logger.info("Calibrating cam%d over %.1fs — hold still", camera_index, duration_s)
         samples: list[float] = []
         deadline = time.monotonic() + duration_s
         last_seen_id = -1
