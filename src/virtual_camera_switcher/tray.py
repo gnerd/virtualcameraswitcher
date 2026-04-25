@@ -151,6 +151,9 @@ class TrayApp:
         return items
 
     def _calibrate_menu_action(self, camera_index: int, _item=None):
+        # Immediate "click received" beep — confirms the menu wired up and
+        # the click reached us, even before we spawn the worker thread.
+        self._calibration_beep(1)
         self._calibrate(camera_index)
 
     def _calibrate(self, camera_index: int):
@@ -163,6 +166,7 @@ class TrayApp:
         try:
             offset = self._app.calibrate_camera(
                 camera_index,
+                countdown_s=2.0,  # one click-beep already played; 2 more ticks
                 on_countdown_tick=self._calibration_beep,
             )
             if offset is None:
