@@ -4,9 +4,6 @@ import sys
 import threading
 import time
 
-import cv2
-
-from .calibration import run_calibration
 from .cameras import CameraManager, enumerate_cameras
 from .config import AppConfig
 from .gaze import GazeDetector
@@ -30,6 +27,8 @@ class App:
         self._virtual_cam: VirtualCameraOutput | None = None
         self._gaze_detector: GazeDetector | None = None
         self._switcher: CameraSwitcher | None = None
+        self._active_camera: int | None = None
+        self._on_camera_change: callable | None = None
 
     def start_pipeline(self):
         """Start the camera switching pipeline in a background thread."""
@@ -42,17 +41,16 @@ class App:
             (self.config.output_width, self.config.output_height),
         )
         self._virtual_cam = VirtualCameraOutput(
-            self.config.output_width, self.config.output_height, self.config.output_fps,
+            self.config.output_width,
+            self.config.output_height,
+            self.config.output_fps,
+            device=self.config.virtual_camera_name,
         )
         self._gaze_detector = GazeDetector()
         self._switcher = CameraSwitcher(
-            self.config.calibrations, self.config.hysteresis_frames,
+            self.config.cameras, self.config.hysteresis_frames,
         )
-
-        # Set initial active camera
-        if self.config.calibrations:
-            self._camera_manager.active_index = self.config.calibrations[0].camera_index
-            self._switcher._current_index = self.config.calibrations[0].camera_index
+        self._active_camera = self._switcher.current_camera_index
 
         self._virtual_cam.start()
         self.running = True
@@ -61,27 +59,33 @@ class App:
         logger.info("Pipeline started")
 
     def _run_pipeline(self):
-        gaze_cap = cv2.VideoCapture(self.config.gaze_camera_index, cv2.CAP_DSHOW)
-        if not gaze_cap.isOpened():
-            logger.error("Cannot open gaze camera %d", self.config.gaze_camera_index)
-            return
-
         try:
             while self.running:
-                # Read gaze camera for head pose detection
-                ret, gaze_frame = gaze_cap.read()
-                if ret and gaze_frame is not None:
-                    yaw = self._gaze_detector.process_frame(gaze_frame)
-                    new_cam = self._switcher.update(yaw)
-                    if new_cam is not None:
-                        self._camera_manager.active_index = new_cam
+                # Read all cameras and detect yaw on each
+                yaw_by_camera: dict[int, float | None] = {}
+                for idx in self._camera_manager.available_indices:
+                    frame = self._camera_manager.read_camera(idx)
+                    if frame is not None:
+                        yaw_by_camera[idx] = self._gaze_detector.detect_yaw(frame)
+                    else:
+                        yaw_by_camera[idx] = None
 
-                # Read active camera and send to virtual camera
+                # Determine which camera to use
+                best = self._switcher.update(yaw_by_camera)
+                if best is not None and best != self._active_camera:
+                    self._active_camera = best
+                    self._camera_manager.active_index = best
+                    if self._on_camera_change:
+                        self._on_camera_change(best)
+
+                # Send active camera frame to virtual camera
                 frame = self._camera_manager.read_active()
                 if frame is not None:
                     self._virtual_cam.send_frame(frame)
+        except Exception:
+            logger.exception("Pipeline error")
         finally:
-            gaze_cap.release()
+            pass
 
     def stop_pipeline(self):
         self.running = False
@@ -95,27 +99,9 @@ class App:
             self._gaze_detector.close()
         logger.info("Pipeline stopped")
 
-    def calibrate(self):
-        was_running = self.running
-        if was_running:
-            self.stop_pipeline()
-
-        cam_mgr = CameraManager(
-            self.config.cameras,
-            (self.config.output_width, self.config.output_height),
-        )
-        cals = run_calibration(self.config, cam_mgr)
-        cam_mgr.close()
-
-        if cals:
-            self.config.calibrations = cals
-            self.config.save()
-            logger.info("Calibration complete: %d cameras calibrated", len(cals))
-        else:
-            logger.warning("Calibration cancelled or failed")
-
-        if was_running:
-            self.start_pipeline()
+    @property
+    def active_camera(self) -> int | None:
+        return self._active_camera
 
     def toggle(self):
         if self.running:
@@ -145,22 +131,21 @@ def interactive_setup() -> AppConfig:
     else:
         selected = [int(x.strip()) for x in choice.split(",")]
 
-    print("\nWhich camera should be used for gaze detection?")
-    print("(This camera reads your face to determine where you're looking)")
-    print(f"Available: {selected}")
-    gaze_idx = int(input("> ").strip())
+    print("\nVirtual camera name (press Enter for default):")
+    name = input("> ").strip()
 
-    config = AppConfig(cameras=selected, gaze_camera_index=gaze_idx)
+    config = AppConfig(cameras=selected)
+    if name:
+        config.virtual_camera_name = name
     config.save()
-    print(f"\nConfig saved. You have {len(selected)} cameras configured.")
-    print("Run calibration next to map your head direction to each camera.\n")
+    print(f"\nConfig saved. {len(selected)} cameras configured.")
+    print("Run 'vcs' to start the switcher.\n")
     return config
 
 
 def main():
     parser = argparse.ArgumentParser(description="Virtual Camera Switcher")
     parser.add_argument("--setup", action="store_true", help="Run interactive setup")
-    parser.add_argument("--calibrate", action="store_true", help="Run calibration")
     parser.add_argument("--no-tray", action="store_true", help="Run without system tray (console only)")
     args = parser.parse_args()
 
@@ -174,16 +159,6 @@ def main():
         sys.exit(1)
 
     app = App(config)
-
-    if args.calibrate:
-        app.calibrate()
-        if not config.calibrations:
-            print("Calibration required before running. Use --calibrate.")
-            sys.exit(1)
-
-    if not config.calibrations:
-        print("No calibration data. Run with --calibrate first.")
-        sys.exit(1)
 
     if args.no_tray:
         app.start_pipeline()
@@ -199,8 +174,7 @@ def main():
         app.start_pipeline()
         tray = TrayApp(
             config,
-            on_calibrate=app.calibrate,
-            on_toggle=app.toggle,
+            app,
             on_quit=lambda: (app.stop_pipeline(), tray.stop()),
         )
         tray.run()

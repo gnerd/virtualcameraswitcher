@@ -15,13 +15,14 @@ virtual camera that seamlessly changes its source as you turn your head.
 
 ## How it works
 
-1. **MediaPipe Face Mesh** tracks 478 facial landmarks on each frame from
-   a designated gaze-detection camera.
+1. **MediaPipe FaceLandmarker** detects 478 facial landmarks on each
+   frame from every configured camera.
 2. **OpenCV solvePnP** converts the landmarks into a head-pose yaw angle.
-3. A **hysteresis-based switcher** maps the yaw angle to the nearest
-   calibrated camera and holds for several frames before committing a
-   switch, preventing flickering.
-4. The active camera's frames are pushed to a **pyvirtualcam** virtual
+3. The camera where your face appears most front-facing (yaw closest to
+   0°) is selected as the active feed.
+4. A **hysteresis-based switcher** holds for several frames before
+   committing a switch, preventing flickering.
+5. The active camera's frames are pushed to a **pyvirtualcam** virtual
    camera device that appears as a regular webcam in any application.
 
 ## Prerequisites
@@ -53,15 +54,6 @@ Scan for cameras and choose which ones to include:
 vcs --setup
 ```
 
-### Calibration
-
-Look at each camera when prompted so the app learns which head direction
-maps to which camera:
-
-```bash
-vcs --calibrate
-```
-
 ### Run
 
 Start the virtual camera switcher as a system-tray application:
@@ -76,28 +68,29 @@ Use `--no-tray` to run in console mode instead.
 
 Settings are stored in `~/.virtual-camera-switcher/config.json`:
 
-| Setting                | Default | Description                                     |
-|------------------------|---------|-------------------------------------------------|
-| `cameras`              | `[]`    | List of camera indices to use                   |
-| `gaze_camera_index`    | `0`     | Camera used for gaze detection                  |
-| `output_width`         | `1280`  | Virtual camera output width                     |
-| `output_height`        | `720`   | Virtual camera output height                    |
-| `output_fps`           | `30`    | Virtual camera frame rate                       |
-| `hysteresis_frames`    | `10`    | Frames before committing a camera switch        |
-| `switch_threshold_degrees` | `5.0` | Unused reserve for future threshold tuning    |
+| Setting                    | Default                      | Description                              |
+|----------------------------|------------------------------|------------------------------------------|
+| `cameras`                  | `[]`                         | List of camera indices to use            |
+| `output_width`             | `1280`                       | Virtual camera output width              |
+| `output_height`            | `720`                        | Virtual camera output height             |
+| `output_fps`               | `30`                         | Virtual camera frame rate                |
+| `hysteresis_frames`        | `10`                         | Frames before committing a camera switch |
+| `virtual_camera_name`      | `"Virtual Camera Switcher"`  | Name shown to video-calling apps         |
 
 ## Architecture
 
 ```text
-┌──────────────┐   frames   ┌───────────────┐
-│ Gaze Camera  │──────────▶│ GazeDetector   │──▶ yaw angle
-└──────────────┘            └───────────────┘       │
-                                                     ▼
-┌──────────────┐            ┌───────────────┐  ┌─────────────┐
-│ Camera 0     │──────────▶│               │  │ Switcher    │
-├──────────────┤            │ CameraManager │◀─┤ (hysteresis)│
-│ Camera 1     │──────────▶│               │  └─────────────┘
-└──────────────┘            └───────┬───────┘
+┌──────────────┐            ┌───────────────┐
+│ Camera 0     │──frames──▶│ GazeDetector  │──▶ yaw 0
+├──────────────┤            │ (per camera)  │──▶ yaw 1
+│ Camera 1     │──frames──▶│               │
+└──────────────┘            └───────────────┘
+                                    │ yaw map
+                                    ▼
+                            ┌───────────────┐
+                            │   Switcher    │──▶ pick most front-facing
+                            │ (hysteresis)  │
+                            └───────┬───────┘
                                     │ active frame
                                     ▼
                             ┌───────────────┐
@@ -112,10 +105,9 @@ src/virtual_camera_switcher/
   __init__.py
   main.py           # Entry point and App orchestration
   config.py         # Configuration dataclasses and persistence
-  gaze.py           # MediaPipe + solvePnP head-pose detection
+  gaze.py           # MediaPipe FaceLandmarker + solvePnP head-pose detection
   cameras.py        # Multi-camera capture management
   switcher.py       # Hysteresis-based camera switching logic
-  calibration.py    # Interactive calibration workflow
   virtual_cam.py    # pyvirtualcam output wrapper
   tray.py           # System tray UI (pystray)
 ```

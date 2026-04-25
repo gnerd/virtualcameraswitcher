@@ -28,30 +28,21 @@ class GazeDetector:
         base_options = mp.tasks.BaseOptions(model_asset_path=str(_MODEL_PATH))
         options = mp.tasks.vision.FaceLandmarkerOptions(
             base_options=base_options,
-            running_mode=mp.tasks.vision.RunningMode.VIDEO,
+            running_mode=mp.tasks.vision.RunningMode.IMAGE,
             num_faces=1,
             min_face_detection_confidence=0.5,
-            min_tracking_confidence=0.5,
         )
         self._landmarker = mp.tasks.vision.FaceLandmarker.create_from_options(options)
-        self._yaw: float | None = None
-        self._timestamp_ms: int = 0
 
-    @property
-    def yaw(self) -> float | None:
-        """Last computed yaw angle in degrees. Negative = looking left, positive = looking right."""
-        return self._yaw
-
-    def process_frame(self, frame_bgr: np.ndarray) -> float | None:
-        """Process a BGR frame and return the head yaw angle in degrees, or None if no face found."""
+    def detect_yaw(self, frame_bgr: np.ndarray) -> float | None:
+        """Return the head yaw angle in degrees, or None if no face found.
+        Closer to 0 means the person is facing the camera straight-on."""
         h, w = frame_bgr.shape[:2]
         frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
-        self._timestamp_ms += 33  # ~30 fps increments
-        results = self._landmarker.detect_for_video(mp_image, self._timestamp_ms)
+        results = self._landmarker.detect(mp_image)
 
         if not results.face_landmarks:
-            self._yaw = None
             return None
 
         landmarks = results.face_landmarks[0]
@@ -75,14 +66,11 @@ class GazeDetector:
             flags=cv2.SOLVEPNP_ITERATIVE,
         )
         if not success:
-            self._yaw = None
             return None
 
         rotation_mat, _ = cv2.Rodrigues(rotation_vec)
-        yaw = np.degrees(np.arctan2(rotation_mat[1, 0], rotation_mat[0, 0]))
-
-        self._yaw = float(yaw)
-        return self._yaw
+        yaw = float(np.degrees(np.arctan2(rotation_mat[1, 0], rotation_mat[0, 0])))
+        return yaw
 
     def close(self):
         self._landmarker.close()

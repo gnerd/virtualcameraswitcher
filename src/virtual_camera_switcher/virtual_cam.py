@@ -9,10 +9,11 @@ logger = logging.getLogger(__name__)
 class VirtualCameraOutput:
     """Wraps pyvirtualcam to send frames to a virtual camera device."""
 
-    def __init__(self, width: int = 1280, height: int = 720, fps: int = 30):
+    def __init__(self, width: int = 1280, height: int = 720, fps: int = 30, device: str | None = None):
         self._width = width
         self._height = height
         self._fps = fps
+        self._device = device
         self._cam: pyvirtualcam.Camera | None = None
 
     def start(self):
@@ -21,6 +22,7 @@ class VirtualCameraOutput:
                 width=self._width,
                 height=self._height,
                 fps=self._fps,
+                device=self._device,
                 fmt=pyvirtualcam.PixelFormat.BGR,
             )
             logger.info(

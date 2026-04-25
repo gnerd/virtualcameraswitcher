@@ -43,7 +43,6 @@ echo === Installation complete ===
 echo.
 echo Next steps:
 echo   1. Run: vcs --setup
-echo   2. Run: vcs --calibrate
-echo   3. Run: vcs
+echo   2. Run: vcs
 echo.
 pause
