@@ -15,16 +15,20 @@ virtual camera that seamlessly changes its source as you turn your head.
 
 ## How it works
 
-1. **MediaPipe FaceLandmarker** detects 478 facial landmarks on each
-   frame from every configured camera.
-2. **OpenCV solvePnP** converts the landmarks into a head-pose yaw angle.
-3. The camera where your face appears most front-facing (yaw closest to
-   0°) is selected as the active feed.
-4. A **hysteresis-based switcher** holds for several frames before
-   committing a switch, preventing flickering.
-5. The active camera's frames are pushed to a **pyvirtualcam** virtual
+1. **MediaPipe FaceLandmarker** detects facial landmarks on frames from
+   each configured camera.
+2. **OpenCV `RQDecomp3x3`** converts the landmarks' rotation matrix into
+   a head-pose yaw angle.
+3. A **two-state switcher** (`LOCKED` / `SEARCHING`) holds on the active
+   camera until your yaw exceeds a threshold for a brief grace period,
+   then quickly scans the other cameras to pick the one you're now
+   facing most directly.
+4. The active camera's frames are pushed to a **pyvirtualcam** virtual
    camera device that appears as a regular webcam in any application.
 
+Because only one camera is being run through face detection at a time
+(the active one, at a low FPS, until you look away), CPU usage stays
+low and USB bandwidth on the inactive cameras is freed up.
 ## Prerequisites
 
 - Windows 10 or 11
@@ -68,38 +72,103 @@ vcsw      # windowless version (recommended; no terminal window)
 
 Use `vcs --no-tray` to run in console-only mode without a tray icon.
 
+### Tray menu
+
+Once running, the tray icon offers:
+
+- **Status** — yellow = starting, green = running, red = stopped.
+- **Camera list** — each camera shown by its Windows device name (for
+  example `cam0: HD Pro Webcam C920`); a dot marks the active feed.
+- **Pause / Resume** — stop or restart the pipeline without quitting.
+- **Calibrate camera ▸ cam{N}** — look directly at the chosen camera
+  and click; you'll hear three short beeps, a higher "go" tone, and a
+  rising chime when calibration succeeds. The yaw offset is saved per
+  camera so its baseline reads as 0° even if it's mounted at an angle.
+  A frame from the sample window is written to
+  `~/.virtual-camera-switcher/snapshots/calibrate-cam{N}-{ts}.png` so
+  you can verify what was captured.
+- **Save snapshots** — grab the current frame from every camera into
+  `~/.virtual-camera-switcher/snapshots/` (handy for diagnosing aim,
+  framing, or focus).
+- **Log to file** — toggle a per-session log under
+  `~/.virtual-camera-switcher/logs/vcs-{ts}.log`.
+- **Open logs folder** — opens that directory in Explorer.
+- **Quit**.
+
 ## Configuration
 
-Settings are stored in `~/.virtual-camera-switcher/config.json`:
+Settings are stored in `~/.virtual-camera-switcher/config.json`. Most
+users only need `vcs --setup` plus the **Calibrate camera** menu items;
+the file is hand-editable for advanced tuning.
 
-| Setting                    | Default                      | Description                              |
-|----------------------------|------------------------------|------------------------------------------|
-| `cameras`                  | `[]`                         | List of camera indices to use            |
-| `output_width`             | `1280`                       | Virtual camera output width              |
-| `output_height`            | `720`                        | Virtual camera output height             |
-| `output_fps`               | `30`                         | Virtual camera frame rate                |
-| `hysteresis_frames`        | `10`                         | Frames before committing a camera switch |
-| `virtual_camera_name`      | `"Virtual Camera Switcher"`  | Name shown to video-calling apps         |
+### Top-level settings
+
+| Setting                  | Default        | Description                                                            |
+|--------------------------|----------------|------------------------------------------------------------------------|
+| `cameras`                | `[]`           | List of camera indices to use                                          |
+| `output_width`           | `1280`         | Virtual camera output width                                            |
+| `output_height`          | `720`          | Virtual camera output height                                           |
+| `output_fps`             | `30`           | Virtual camera frame rate                                              |
+| `virtual_camera_backend` | `"unitycapture"` | pyvirtualcam backend (`unitycapture`, `obs`, etc.)                   |
+| `virtual_camera_name`    | `""`           | Optional explicit device name                                          |
+| `capture_width`          | `1280`         | Default capture width per camera                                       |
+| `capture_height`         | `720`          | Default capture height per camera                                      |
+| `capture_fps`            | `30`           | Default capture frame rate per camera                                  |
+| `capture_fourcc`         | `"MJPG"`       | Default FOURCC; MJPG keeps two USB-2.0 webcams within bandwidth budget |
+| `look_away_yaw_deg`      | `25.0`         | Yaw (degrees) above which the active camera is considered "looked away"|
+| `look_away_grace_s`      | `0.25`         | Seconds you must be looking away before a search starts                |
+| `search_timeout_s`       | `0.6`          | Maximum seconds spent scanning the other cameras before giving up      |
+| `detect_fps_locked`      | `8`            | Detection FPS while locked on the active camera                        |
+| `detect_fps_searching`   | `20`           | Detection FPS while scanning for a new camera                          |
+
+### Per-camera overrides
+
+Add a `camera_overrides` object keyed by camera index to tune individual
+cameras (capture format, backend, sensor controls, calibration offset):
+
+```json
+"camera_overrides": {
+  "0": {
+    "controls": {
+      "autofocus": 1,
+      "auto_exposure": 0.75,
+      "sharpness": 200,
+      "saturation": 145,
+      "contrast": 140
+    }
+  },
+  "1": {
+    "capture_backend": "MSMF",
+    "capture_fourcc": "MJPG",
+    "capture_width": 1280,
+    "capture_height": 720
+  }
+}
+```
+
+Supported override fields: `capture_backend` (`DSHOW`/`MSMF`/`ANY`),
+`capture_fourcc`, `capture_width`, `capture_height`, `capture_fps`,
+`yaw_offset` (set automatically by Calibrate), and `controls` (any of
+`brightness`, `contrast`, `saturation`, `hue`, `gain`, `exposure`,
+`auto_exposure`, `sharpness`, `gamma`, `backlight`, `white_balance`,
+`auto_wb`, `autofocus`, `focus`, `zoom`, `pan`, `tilt`).
 
 ## Architecture
 
 ```text
-┌──────────────┐            ┌───────────────┐
-│ Camera 0     │──frames──▶│ GazeDetector  │──▶ yaw 0
-├──────────────┤            │ (per camera)  │──▶ yaw 1
-│ Camera 1     │──frames──▶│               │
-└──────────────┘            └───────────────┘
-                                    │ yaw map
-                                    ▼
-                            ┌───────────────┐
-                            │   Switcher    │──▶ pick most front-facing
-                            │ (hysteresis)  │
-                            └───────┬───────┘
-                                    │ active frame
-                                    ▼
-                            ┌───────────────┐
-                            │ VirtualCamera │──▶ Zoom / Teams / etc.
-                            └───────────────┘
+┌──────────────┐         ┌───────────────┐
+│ Active cam   │──frame──▶│ GazeDetector  │──▶ yaw
+└──────────────┘         └───────┬───────┘
+      ▲                          │
+      │                          ▼
+      │                  ┌───────────────┐
+      │                  │ GazeSwitcher  │
+      │                  │ LOCKED ⇄ SEARCH│
+      │                  └───────┬───────┘
+      │ (when SEARCHING,         │ picks new active
+      │  scans inactive cams)    ▼
+      └──────────────────── active frame ──▶ VirtualCamera
+                                            ──▶ Zoom / Teams / etc.
 ```
 
 ## Project structure
@@ -107,11 +176,32 @@ Settings are stored in `~/.virtual-camera-switcher/config.json`:
 ```text
 src/virtual_camera_switcher/
   __init__.py
-  main.py           # Entry point and App orchestration
-  config.py         # Configuration dataclasses and persistence
-  gaze.py           # MediaPipe FaceLandmarker + solvePnP head-pose detection
-  cameras.py        # Multi-camera capture management
-  switcher.py       # Hysteresis-based camera switching logic
+  main.py           # Entry point, App orchestration, calibration, snapshots
+  config.py         # AppConfig + CameraOverride dataclasses (JSON-persisted)
+  gaze.py           # MediaPipe FaceLandmarker + RQDecomp3x3 head-pose yaw
+  cameras.py        # CameraReader (multi-backend negotiation) + CameraManager
+  switcher.py       # GazeSwitcher state machine (LOCKED / SEARCHING)
   virtual_cam.py    # pyvirtualcam output wrapper
-  tray.py           # System tray UI (pystray)
+  tray.py           # System tray UI (pystray) with calibration + snapshots
+filters/
+  UnityCaptureFilter64.dll  # Bundled DirectShow virtual-camera filter
+install.bat         # Admin installer: registers filter, pip-installs, fetches model
 ```
+
+## Troubleshooting
+
+- **Switching feels reluctant or never happens.** Run **Calibrate camera**
+  for each camera while looking directly at it. Cameras mounted at an
+  angle have a non-zero baseline yaw that the switcher needs to know
+  about; otherwise even a head-on glance reads as "looking away."
+- **A camera gets the wrong framing (zoom, crop, off-center).** Some AI
+  webcams (for example the OBSBOT Tiny series) reframe based on which
+  capture mode you negotiate. If their built-in app shows the correct
+  framing but this app doesn't, remove that camera's `capture_backend`
+  / `capture_fourcc` overrides and let it negotiate naturally.
+- **Two USB-2.0 webcams cause one to drop to ~1 fps.** USB 2.0 can't
+  carry two uncompressed streams. Leave `capture_fourcc` set to `MJPG`
+  so each camera compresses on the device.
+- **Moved the project folder and the virtual camera disappeared.** The
+  Unity Capture DLL is registered with an absolute path. Re-run
+  `install.bat` as Administrator from the new location.
