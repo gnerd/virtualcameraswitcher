@@ -142,15 +142,18 @@ class TrayApp:
     def _calibration_items(self):
         items = []
         for idx in self._config.cameras:
+            # Capture idx via default-arg trick (pystray inspects the
+            # callable's signature; partial(method, idx) confuses it on
+            # Windows and the click is silently dropped).
             items.append(pystray.MenuItem(
                 f"cam{idx}: {self._device_name(idx)}",
-                partial(self._calibrate_menu_action, idx),
+                lambda _icon, _item, i=idx: self._calibrate_menu_action(i),
             ))
         if not items:
             items.append(pystray.MenuItem("(no cameras)", None, enabled=False))
         return items
 
-    def _calibrate_menu_action(self, camera_index: int, _item=None):
+    def _calibrate_menu_action(self, camera_index: int):
         # Immediate "click received" beep — confirms the menu wired up and
         # the click reached us, even before we spawn the worker thread.
         self._calibration_beep(1)
