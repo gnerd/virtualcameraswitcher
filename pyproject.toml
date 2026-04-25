@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "virtual-camera-switcher"
-version = "0.1.0"
+version = "1.0.0"
 description = "Automatically switches virtual camera feed based on gaze direction"
 requires-python = ">=3.10"
 dependencies = [
