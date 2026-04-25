@@ -1,4 +1,6 @@
 import logging
+from pathlib import Path
+
 import numpy as np
 import cv2
 import mediapipe as mp
@@ -18,17 +20,22 @@ _MODEL_POINTS = np.array([
 # MediaPipe landmark indices for the 6 model points above
 _LANDMARK_INDICES = [1, 152, 33, 263, 61, 291]
 
+_MODEL_PATH = Path(__file__).parent / "face_landmarker.task"
+
 
 class GazeDetector:
     def __init__(self):
-        self._face_mesh = mp.solutions.face_mesh.FaceMesh(
-            static_image_mode=False,
-            max_num_faces=1,
-            refine_landmarks=True,
-            min_detection_confidence=0.5,
+        base_options = mp.tasks.BaseOptions(model_asset_path=str(_MODEL_PATH))
+        options = mp.tasks.vision.FaceLandmarkerOptions(
+            base_options=base_options,
+            running_mode=mp.tasks.vision.RunningMode.VIDEO,
+            num_faces=1,
+            min_face_detection_confidence=0.5,
             min_tracking_confidence=0.5,
         )
+        self._landmarker = mp.tasks.vision.FaceLandmarker.create_from_options(options)
         self._yaw: float | None = None
+        self._timestamp_ms: int = 0
 
     @property
     def yaw(self) -> float | None:
@@ -39,15 +46,17 @@ class GazeDetector:
         """Process a BGR frame and return the head yaw angle in degrees, or None if no face found."""
         h, w = frame_bgr.shape[:2]
         frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        results = self._face_mesh.process(frame_rgb)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
+        self._timestamp_ms += 33  # ~30 fps increments
+        results = self._landmarker.detect_for_video(mp_image, self._timestamp_ms)
 
-        if not results.multi_face_landmarks:
+        if not results.face_landmarks:
             self._yaw = None
             return None
 
-        landmarks = results.multi_face_landmarks[0]
+        landmarks = results.face_landmarks[0]
         image_points = np.array(
-            [[landmarks.landmark[i].x * w, landmarks.landmark[i].y * h] for i in _LANDMARK_INDICES],
+            [[landmarks[i].x * w, landmarks[i].y * h] for i in _LANDMARK_INDICES],
             dtype=np.float64,
         )
 
@@ -76,4 +85,4 @@ class GazeDetector:
         return self._yaw
 
     def close(self):
-        self._face_mesh.close()
+        self._landmarker.close()

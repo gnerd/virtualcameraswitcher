@@ -22,17 +22,28 @@ if exist "%~dp0filters\UnityCaptureFilter64.dll" (
     echo   and place it in the filters\ subdirectory.
 )
 
-:: Install Python dependencies
+:: Install Python package (editable) with dependencies
 echo.
-echo Installing Python dependencies...
-pip install -r "%~dp0requirements.txt"
+echo Installing Python package...
+pip install -e "%~dp0."
+
+:: Download face landmarker model if missing
+set MODEL_PATH=%~dp0src\virtual_camera_switcher\face_landmarker.task
+if not exist "%MODEL_PATH%" (
+    echo.
+    echo Downloading MediaPipe face landmarker model...
+    python -c "import urllib.request; urllib.request.urlretrieve('https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task', r'%MODEL_PATH%')"
+    echo   Model downloaded.
+) else (
+    echo   Face landmarker model already present.
+)
 
 echo.
 echo === Installation complete ===
 echo.
 echo Next steps:
-echo   1. Run: python -m virtual_camera_switcher.main --setup
-echo   2. Run: python -m virtual_camera_switcher.main --calibrate
-echo   3. Run: python -m virtual_camera_switcher.main
+echo   1. Run: vcs --setup
+echo   2. Run: vcs --calibrate
+echo   3. Run: vcs
 echo.
 pause

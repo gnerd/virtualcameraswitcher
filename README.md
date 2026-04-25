@@ -34,7 +34,7 @@ virtual camera that seamlessly changes its source as you turn your head.
 ## Installation
 
 ```bash
-pip install -r requirements.txt
+pip install -e .
 ```
 
 To register the Unity Capture virtual camera filter (requires admin):
@@ -50,7 +50,7 @@ install.bat
 Scan for cameras and choose which ones to include:
 
 ```bash
-python -m virtual_camera_switcher.main --setup
+vcs --setup
 ```
 
 ### Calibration
@@ -59,7 +59,7 @@ Look at each camera when prompted so the app learns which head direction
 maps to which camera:
 
 ```bash
-python -m virtual_camera_switcher.main --calibrate
+vcs --calibrate
 ```
 
 ### Run
@@ -67,7 +67,7 @@ python -m virtual_camera_switcher.main --calibrate
 Start the virtual camera switcher as a system-tray application:
 
 ```bash
-python -m virtual_camera_switcher.main
+vcs
 ```
 
 Use `--no-tray` to run in console mode instead.
